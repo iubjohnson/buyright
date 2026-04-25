@@ -1,167 +1,149 @@
 # BuyRight — Product Specification
-**Version 1.0**  
 **Author:** Bryan Johnson  
-**Date:** April 2026
+**Last Updated:** April 2026
 
 ---
 
 ## Problem Statement
 
-Independent specialty retailers struggle with inventory buying decisions. Most are too small for a full ERP system like Odoo, but too complex to rely on gut feel and spreadsheets. The result is a cycle of stockouts on top sellers and overbuying on slow movers — both of which hurt cash flow and customer experience.
+Great Fermentations carries thousands of active SKUs across beer, wine, mead, cider, and related categories. Demand is seasonal, vendor lead times vary, and buying decisions have historically relied on experience and gut feel rather than data signals. The result is a recurring pattern of overstocking slow movers and stocking out on fast ones — both of which hurt cash flow and customer experience.
 
-There is no affordable, accessible tool that meets these businesses where they are — using their existing sales data — and gives them clear, confident answers to the question: *"What should I buy, how much, and why?"*
+Odoo has the raw data (sales history, receipts, on-hand quantities, replenishment rules) but no built-in tool to surface actionable buying intelligence. BuyRight fills that gap.
 
 ---
 
 ## Product Vision
 
-BuyRight is an AI-powered inventory buying assistant for independent specialty retailers. Upload your sales history, get an actionable buy list that tells you what to reorder, how much, and why — in plain English.
+BuyRight is an internal inventory analysis tool that connects to Odoo, surfaces three categories of actionable insight, and lets the buyer review, adjust, and push changes back to Odoo without leaving the tool.
 
 ---
 
-## Target Customer
+## Data Sources
 
-**Independent specialty retailers** — physical storefronts and/or e-commerce operations selling physical products to end consumers. Examples include homebrew supply shops, pet stores, hobby retailers, kitchen supply stores, garden centers, and similar niche retail businesses.
+All data is pulled live from Odoo via XML-RPC on each session.
 
-**Characteristics:**
-- 100–5,000 active SKUs
-- Buying decisions made by owner or a small team
-- Currently tracking inventory in spreadsheets or basic point-of-sale systems
-- Not ready for or cannot afford a full ERP implementation
-- Need simple, actionable outputs — not complex dashboards
-
----
-
-## User Persona
-
-**Bryan, specialty retail owner**
-- Runs day-to-day operations including purchasing
-- Not a data analyst — needs decisions, not raw numbers
-- Has sales history data but lacks the tools to extract buying signals from it
-- Wants to make confident reorder decisions without spending hours in spreadsheets
-- Staff need to be able to act on outputs without per-SKU judgment calls
-
----
-
-## MVP Scope
-
-### Inputs
-
-**File 1: Sales History CSV**
-
-Each row represents one line item on one sales order.
-
-| Field | Type | Notes |
+| Source | Odoo Model | Notes |
 |---|---|---|
-| SKU | String | Product identifier |
-| Product Name | String | Display name |
-| Sales Date | Date | Drives velocity and seasonality calculations |
-| Sales Order Number | String | Allows grouping by transaction |
-| Qty Sold | Integer | Units sold on that order line |
+| Sales | `stock.move` | `location_dest_id.usage = 'customer'`, `state = 'done'` |
+| Returns | `stock.move` | `location_id.usage = 'customer'`, `location_dest_id.usage = 'internal'` — applied as negative qty |
+| Receipts | `stock.move` | `location_id.usage = 'supplier'`, `location_dest_id.usage = 'internal'` |
+| Products | `product.product` | Active, sale_ok, purchase_ok, has SKU |
+| Replenishment rules | `stock.warehouse.orderpoint` | Current min/max per product |
 
-**File 2: Product Master CSV**
-
-Each row represents one product.
-
-| Field | Type | Notes |
-|---|---|---|
-| SKU | String | Joins to sales history |
-| Product Name | String | Display name |
-| On Hand Qty | Integer | Current inventory level |
-| Vendor | String | Supplier name |
+**Product filters applied:**
+- Excludes products with active BOMs (manufactured items)
+- Excludes products tagged with: rhizome, fresh juice, dropship
+- Excludes products with "proper pour" in the name
+- Excludes products with `purchase_ok = false`
 
 ---
 
-### Calculation Engine
+## Calculation Engine
 
-The following calculations are performed per SKU after joining the two input files:
+### Blended Weekly Velocity
+Recency-weighted average units sold per week. Recent sales are weighted more heavily using exponential decay with a 12-week half-life. This prevents obsolete demand patterns from distorting current recommendations.
 
-**Weekly Sales Velocity**
-- Average units sold per week across the dataset
-- Recency-weighted — recent sales weighted more heavily than older sales
-- Prevents distortion from obsolete demand patterns
+### Peak Velocity
+Best 2-month rolling average from the monthly breakdown. Used for suggested max on seasonally adjusted products so the replenishment setting reflects peak demand year-round, not just current conditions.
 
-**Seasonality Detection**
-- If dataset covers 12+ months, identify recurring seasonal patterns
-- Factor current date position into recommendations
-- Surface seasonality signals in AI explanations
+### Seasonal Adjustment
+A product is considered seasonally adjusted when:
+- `peakVelocity >= 2 units/week` (minimum meaningful volume)
+- `peakVelocity / blendedVelocity > 1.75` (peak is at least 75% above the average)
 
-**Days of Stock Remaining**
-- Formula: `(On Hand Qty ÷ Weekly Velocity) × 7`
-- Primary sort field for output table — most urgent items surface first
+### Suggested Min
+`max(1, round(blendedVelocity × 2))` — two weeks of safety stock at current velocity.
 
-**Reorder Point**
-- Threshold at which reorder should be triggered
-- MVP default: 2 weeks of sales velocity as safety buffer
-- Displayed as a status indicator (below reorder point / approaching / healthy)
+### Suggested Max
+- **Seasonal products:** `round(peakVelocity × 8)` — 8 weeks at peak velocity, so the product is stocked for the busy season year-round
+- **Non-seasonal products:** `round(blendedVelocity × 8)` — 8 weeks at current velocity
 
-**Suggested Buy Quantity**
-- Formula: `(Target Weeks of Stock × Weekly Velocity) - On Hand Qty`
-- Floor at zero — never recommend negative quantities
-- Target weeks of stock defaults to 4, user-adjustable
+### Stockout Detection
+For each product, the opening balance is reconstructed by working backwards from current on-hand:
 
----
+```
+openingBalance = max(0, onHand + totalSales - totalReceipts)
+```
 
-### Edge Case Handling
-
-| Scenario | Behavior |
-|---|---|
-| SKU with no sales history | Flagged separately, no recommendation generated |
-| SKU with very few data points | Flagged, recommendation shown but visually distinguished as low confidence |
-| Suggested buy qty calculates to zero or negative | Displayed as 0, no action recommended |
-| SKU in product master not found in sales history | Treated as no sales history |
+Moves are then replayed forward chronologically. When balance reaches zero before a receipt arrives, a stockout event is recorded with the out date, restock date, and days out.
 
 ---
 
-### Output Table
+## The Three Tabs
 
-Sorted by **Days of Stock Remaining, ascending** (most urgent first).
+### Overstocked
+Products where `onHand > suggestedMax`, sorted by overstock ratio (most overstocked first).
 
-| Column | Description | Editable |
-|---|---|---|
-| SKU | Product identifier | No |
-| Product Name | Display name | No |
-| Vendor | Supplier name | No |
-| On Hand | Current inventory | No |
-| Weekly Velocity | Avg units sold per week (recency-weighted) | No |
-| Days of Stock | Estimated days until stockout | No |
-| Reorder Status | Below reorder point / Approaching / Healthy | No |
-| Suggested Buy Qty | AI-calculated recommended order quantity | No |
-| Buy Qty | User-editable final order quantity | **Yes** |
-| AI Insight | Plain English explanation of recommendation | No |
+**What you can do:**
+- Edit suggested min/max values inline
+- Push updated values to Odoo orderpoints (creates if none exists)
+- Dismiss for 8 weeks (product is hidden until snooze expires or it's re-fetched with worse numbers)
+- Open AI chat for seasonal products to understand the demand pattern
+
+**Dismiss logic:** Stored in `data/dismissed-overstocked.json`. Each entry records the dismissal date, on-hand at time of dismissal, and suggested min/max. Entries expire automatically after 8 weeks.
 
 ---
 
-### User Controls
+### Stockout History
+Products that experienced at least one stockout event in the analysis period, sorted by stockout frequency then duration.
 
-- **Target Weeks of Stock** — numeric input, default 4, adjustable by user. Recalculates suggested buy quantities in real time when changed.
-- **Buy Qty field** — editable per row. Pre-populated with suggested buy qty. User can override per SKU.
-- **Export to CSV** — exports the final buy list (SKU, Product Name, Vendor, Buy Qty) for use as a purchase order input.
+**What you can do:**
+- View inventory balance chart (area chart with stockout periods shaded red, restock events marked green)
+- Edit suggested min/max values inline
+- Push updated values to Odoo orderpoints
+- Dismiss for 8 weeks
+- Bulk select + bulk push or dismiss
+- Filter by "Low stock strategy" — products with `currentMax <= 1`
+- Open AI chat for seasonal products
+
+**Low stock strategy badge:** Products with `currentMax <= 1` are flagged because frequent stockouts are expected by design. The badge makes these visually distinct and the suggested max column shows whether demand has grown beyond the current strategy.
+
+**Dismiss logic:** Stored in `data/dismissed-stockouts.json`, same structure as overstocked.
 
 ---
 
-## AI Layer
+### Seasonal Watch
+Products flagged as seasonally adjusted, grouped by peak season (Spring/Summer/Fall/Winter).
 
-The deterministic calculation engine handles the numbers. The AI layer handles interpretation — turning numbers into confidence and language.
+- Current season auto-expands and auto-loads AI insights on data load
+- Other seasons are collapsed with an on-demand "Generate Insights" button
+- AI insight shown inline under each product name
+- Per-product chat available via 💬 button next to the insight
 
-### Per-SKU AI Insights
-Each SKU in the output table includes a plain English explanation of the recommendation. Examples:
+---
 
-- *"Sales velocity has increased 40% over the past 30 days and you have 8 days of stock remaining. Recommend buying ahead of your normal cycle."*
-- *"This product sells consistently at about 12 units per week with no strong seasonal pattern. Current stock covers 3 weeks — slightly below your 4-week target."*
-- *"Sales dropped sharply 3 weeks ago after a period of strong demand. This may indicate a stockout masking true demand — consider buying conservatively until the pattern stabilizes."*
+## AI Features
 
-### Anomaly Detection
-The AI flags unusual patterns in the data that could distort recommendations:
-- Single large orders skewing velocity calculations
-- Sudden drops in sales that may indicate a stockout rather than reduced demand
-- SKUs with erratic, unpredictable sales patterns
+### Seasonal Insights (`api/seasonal-insights.js`)
+Batched call to claude-haiku-4-5. Up to 40 products per request, sorted by peak/blended ratio. Returns a short plain-English insight per SKU explaining the seasonal pattern, when demand peaks, and what to watch for.
 
-### Conversational Interface
-Users can ask natural language questions about their data and recommendations:
-- *"Why are you recommending 48 units of this product?"*
-- *"What would happen if I changed my target weeks to 8?"*
-- *"Which products are most at risk of stocking out this month?"*
+### Per-Product Chat (`api/product-chat.js`)
+Conversational interface per product. The system prompt includes the full transaction history (date, qty, order reference) so the AI can answer specific questions about individual orders, patterns, and anomalies. Uses claude-haiku-4-5 with 512 max tokens per response.
+
+---
+
+## Pushing Changes to Odoo
+
+`api/update-orderpoint.js` handles writes back to Odoo:
+
+1. Looks up the product by SKU (`default_code`)
+2. Finds the active orderpoint for that product
+3. If found: updates `product_min_qty` and `product_max_qty`
+4. If not found: creates a new orderpoint using the default warehouse
+
+After a successful push, the product is automatically dismissed from the current tab.
+
+---
+
+## Dismiss / Snooze System
+
+Dismissal is designed to reduce noise without permanently hiding problems.
+
+- **Duration:** 8 weeks from dismissal date
+- **Storage:** Local JSON files (`data/dismissed-*.json`) — survives browser clears, not dependent on cookies or localStorage
+- **Auto-expiry:** Expired entries are pruned on the next GET request to the dismissed API
+- **Tab badge:** Reflects visible (non-dismissed) count only
+- **Re-surface:** Products automatically reappear after 8 weeks or if you reload with new data
 
 ---
 
@@ -169,39 +151,20 @@ Users can ask natural language questions about their data and recommendations:
 
 | Layer | Technology |
 |---|---|
-| Frontend framework | React (Vite) |
-| Styling | Tailwind CSS |
-| CSV parsing | PapaParse |
-| AI integration | Anthropic Claude API (claude-sonnet-4-20250514) |
-| Deployment | Vercel (via GitHub) |
+| Frontend | React 19 (Vite) |
+| Styling | Tailwind CSS v4 |
+| Charts | Recharts |
+| Odoo integration | `xmlrpc` npm package |
+| AI | Anthropic claude-haiku-4-5 |
+| API routes | Vercel serverless functions |
+| Dismiss persistence | Local JSON files (`data/`) |
 
 ---
 
-## Out of Scope for MVP
+## Out of Scope
 
-The following are explicitly deferred to future versions:
-
-- Direct integration with POS or e-commerce platforms (Shopify, Square, etc.)
-- Supplier lead time inputs
-- Supplier minimum order quantity handling
 - Multi-location inventory
-- Purchase order generation and sending
-- User accounts and saved sessions
+- Purchase order generation or sending
+- User accounts or saved sessions
 - Mobile optimization
-
----
-
-## Success Criteria for MVP
-
-- User can upload two CSV files and receive a ranked buy list within 60 seconds
-- AI insights are specific and actionable — not generic
-- User can adjust target weeks and see recommendations update in real time
-- User can override any suggested buy quantity
-- User can export a clean buy list CSV suitable for creating a purchase order
-- A non-technical retail owner can use the tool without instructions
-
----
-
-## Origin Story
-
-BuyRight was designed by Bryan Johnson, who operated Great Fermentations — an Indianapolis-based specialty homebrew supply retailer — for over a decade. Inventory buying decisions were one of the most operationally challenging aspects of running the business: too much reliance on gut feel, not enough signal from the data. BuyRight is the tool Bryan wished he'd had.
+- Supplier lead time or MOQ handling

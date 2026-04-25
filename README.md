@@ -1,99 +1,74 @@
 # BuyRight
 
-**AI-powered inventory buying assistant for independent specialty retailers.**
+**AI-powered inventory management assistant for Great Fermentations.**
 
-BuyRight helps small retail business owners make smarter inventory purchasing decisions. Upload your sales history and current inventory, and BuyRight tells you what to reorder, how much, and why — in plain English.
-
----
-
-## The Problem
-
-Independent specialty retailers live in the gap between gut feel and full ERP systems. Too complex for a spreadsheet, too small for Odoo or NetSuite. The result: stockouts on top sellers, overbuying on slow movers, and purchasing decisions made without clear data signals.
-
-## The Solution
-
-BuyRight analyzes your sales history to calculate recency-weighted velocity, detects seasonal patterns, and generates a ranked buy list sorted by urgency. An AI layer explains each recommendation in plain language so you understand *why* — not just *what*.
+BuyRight connects directly to Odoo and surfaces three types of actionable inventory insights: products that are overstocked, products that have historically stocked out, and products with seasonal demand patterns. It lets you review, adjust, and push replenishment rule changes back to Odoo without leaving the tool.
 
 ---
 
-## Features
+## What It Does
 
-- 📂 **CSV upload** — works with your existing sales data, no new systems required
-- 📊 **Intelligent reorder analysis** — recency-weighted velocity, seasonality detection, days of stock remaining
-- 🤖 **AI-powered insights** — plain English explanation of every recommendation
-- ✏️ **Editable buy quantities** — accept, adjust, or override any suggestion
-- ⚙️ **Adjustable parameters** — set your own target weeks of stock
-- 📤 **Export to CSV** — download your final buy list as a purchase order input
-- 💬 **Conversational interface** — ask questions about your data in plain English
+BuyRight pulls live data from Odoo and runs three analyses:
 
----
+**Overstocked** — Products where current on-hand exceeds the suggested maximum based on sales velocity. Shows how many weeks of stock you're sitting on and lets you update the Odoo replenishment rules directly.
 
-## How It Works
+**Stockout History** — Products that ran out of stock before a resupply arrived. Reconstructs the inventory balance timeline from sales and receipt history, shows every stockout event with duration, and flags products intentionally set to a low-stock strategy.
 
-1. Upload your **sales history CSV** (SKU, product name, sales date, order number, qty sold)
-2. Upload your **product master CSV** (SKU, product name, on-hand qty, vendor)
-3. Set your **target weeks of stock** (default: 4 weeks)
-4. Review your **ranked buy list** — sorted by urgency, explained in plain English
-5. Adjust quantities as needed and **export your buy list**
+**Seasonal Watch** — Products where peak-season velocity is significantly higher than the blended average. Grouped by season (Spring/Summer/Fall/Winter). AI-generated insights explain what's driving the seasonal pattern and when to prepare.
 
 ---
 
-## Input Format
+## Key Features
 
-**Sales History CSV**
-| Field | Description |
-|---|---|
-| SKU | Product identifier |
-| Product Name | Display name |
-| Sales Date | Date of sale |
-| Sales Order Number | Order identifier |
-| Qty Sold | Units sold |
-
-**Product Master CSV**
-| Field | Description |
-|---|---|
-| SKU | Product identifier |
-| Product Name | Display name |
-| On Hand Qty | Current inventory level |
-| Vendor | Supplier name |
+- **Live Odoo connection** — pulls sales, receipts, products, and replenishment rules via XML-RPC
+- **Recency-weighted velocity** — recent sales count more (12-week half-life exponential decay)
+- **Seasonal intelligence** — peak velocity calculated from the best 2-month rolling window; products with peak > 1.75x blended average and peak ≥ 2/wk flagged as seasonal
+- **Suggested min/max** — editable per row, pre-filled with calculated values
+- **Push to Odoo** — writes updated replenishment rules back to Odoo orderpoints in one click
+- **Dismiss** — snooze any product for 8 weeks (persisted to disk, survives browser restarts)
+- **AI chat** — per-product chat with full transaction history as context
+- **Stockout analysis drawer** — area chart of inventory balance over time with stockout periods and restock events highlighted
+- **Bulk actions** — select multiple products and push or dismiss in one action
+- **Seasonal badge** — links directly to AI chat for seasonally adjusted products
 
 ---
 
 ## Tech Stack
 
-- **React** (Vite)
-- **Tailwind CSS**
-- **PapaParse** — CSV parsing
-- **Anthropic Claude API** — AI insights and conversational interface
+- **React 19** (Vite)
+- **Tailwind CSS v4**
+- **Recharts** — inventory balance chart
+- **xmlrpc** — Odoo XML-RPC integration
+- **Anthropic Claude** (claude-haiku-4-5) — seasonal insights and per-product chat
+- **Vercel** — hosting and serverless API routes
 
 ---
 
 ## Getting Started
 
+Requires a `.env` file with Odoo credentials:
+
+```
+ODOO_URL=https://your-instance.odoo.com
+ODOO_DATABASE=your-database
+ODOO_API_USERNAME=your@email.com
+ODOO_API_PASSWORD=your-api-key
+VITE_ANTHROPIC_API_KEY=your-anthropic-key
+```
+
+Run locally with Vercel dev (required for serverless API routes):
+
 ```bash
-git clone https://github.com/iubjohnson/buyright.git
-cd buyright
 npm install
-```
-
-Add your Anthropic API key to a `.env` file:
-```
-VITE_ANTHROPIC_API_KEY=your_api_key_here
-```
-
-Start the development server:
-```bash
-npm run dev
+vercel dev
 ```
 
 ---
 
 ## Background
 
-BuyRight was built by Bryan Johnson, who operated [Great Fermentations](https://www.greatfermentations.com) — an Indianapolis-based specialty homebrew supply retailer — for over a decade. Inventory buying decisions were one of the hardest operational challenges in running the business. BuyRight is the tool he wished he'd had.
+Built by Bryan Johnson for [Great Fermentations](https://www.greatfermentations.com) — an Indianapolis-based specialty homebrew supply retailer. The goal: replace spreadsheet-based buying decisions with a tool that surfaces the right signal at the right time and lets you act on it without switching between systems.
 
 ---
 
-## Product Specification
-
-For a detailed breakdown of product decisions, logic, and design rationale see [PRODUCT_SPEC.md](./PRODUCT_SPEC.md).
+For detailed logic and design decisions see [PRODUCT_SPEC.md](./PRODUCT_SPEC.md).
